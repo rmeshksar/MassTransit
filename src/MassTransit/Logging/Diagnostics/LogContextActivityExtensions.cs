@@ -7,6 +7,7 @@ namespace MassTransit.Logging
     using System.Collections.Generic;
     using System.Diagnostics;
     using Courier.Contracts;
+    using Metadata;
     using Middleware;
     using Transports;
 
@@ -17,7 +18,11 @@ namespace MassTransit.Logging
             params (string Key, object? Value)[] tags)
             where T : class
         {
-            var activity = Cached.Source.Value.CreateActivity(transportContext.ActivityName, ActivityKind.Producer);
+            var parentActivityContext = System.Diagnostics.Activity.Current == null
+                ? GetParentActivityContext(context.Headers)
+                : default;
+
+            var activity = Cached.Source.Value.CreateActivity(transportContext.ActivityName, ActivityKind.Producer, parentActivityContext);
             if (activity == null)
                 return null;
 
@@ -31,7 +36,11 @@ namespace MassTransit.Logging
         public static StartedActivity? StartOutboxSendActivity<T>(this ILogContext logContext, SendContext<T> context)
             where T : class
         {
-            var activity = Cached.Source.Value.CreateActivity("outbox send", ActivityKind.Producer);
+            var parentActivityContext = System.Diagnostics.Activity.Current == null
+                ? GetParentActivityContext(context.Headers)
+                : default;
+
+            var activity = Cached.Source.Value.CreateActivity("outbox send", ActivityKind.Producer, parentActivityContext);
             if (activity == null)
                 return null;
 
@@ -56,7 +65,7 @@ namespace MassTransit.Logging
         public static StartedActivity? StartReceiveActivity(this ILogContext logContext, string name, string inputAddress, string endpointName,
             ReceiveContext context)
         {
-            var parentActivityContext = GetParentActivityContext(context.TransportHeaders);
+            var parentActivityContext = GetParentActivityContext(context.TransportHeaders, true);
 
             var activity = Cached.Source.Value.CreateActivity(name, ActivityKind.Consumer, parentActivityContext);
             if (activity == null)
@@ -219,12 +228,19 @@ namespace MassTransit.Logging
             return new StartedActivity(activity);
         }
 
-        static ActivityContext GetParentActivityContext(Headers headers)
+        static ActivityContext GetParentActivityContext(Headers headers, bool isRemote = false)
         {
-            return headers.TryGetHeader(DiagnosticHeaders.ActivityId, out var headerValue) && headerValue is string activityId
-                && ActivityContext.TryParse(activityId, null, out var activityContext)
-                    ? activityContext
-                    : default;
+            if (headers.TryGetHeader(DiagnosticHeaders.ActivityId, out var headerValue)
+                && headerValue is string activityId
+                && ActivityContext.TryParse(activityId, null, out var activityContext))
+            {
+                if (isRemote && System.Diagnostics.Activity.Current == null)
+                    return new ActivityContext(activityContext.TraceId, activityContext.SpanId, activityContext.TraceFlags, activityContext.TraceState, true);
+
+                return activityContext;
+            }
+
+            return default;
         }
 
         static StartedActivity? StartActivity(Action<System.Diagnostics.Activity> started)
@@ -260,7 +276,9 @@ namespace MassTransit.Logging
 
         static class Cached
         {
-            internal static readonly Lazy<ActivitySource> Source = new Lazy<ActivitySource>(() => new ActivitySource(DiagnosticHeaders.DefaultListenerName));
+            internal static readonly Lazy<ActivitySource> Source = new Lazy<ActivitySource>(() =>
+                new ActivitySource(DiagnosticHeaders.DefaultListenerName, HostMetadataCache.Host.MassTransitVersion));
+
             internal static readonly ConcurrentDictionary<string, string> OperationNames = new ConcurrentDictionary<string, string>(StringComparer.Ordinal);
         }
     }

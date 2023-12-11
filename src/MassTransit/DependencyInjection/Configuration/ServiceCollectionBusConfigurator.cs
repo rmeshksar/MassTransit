@@ -4,6 +4,7 @@ namespace MassTransit.Configuration
     using System.Collections.Generic;
     using System.Linq;
     using Context;
+    using Courier;
     using DependencyInjection;
     using DependencyInjection.Registration;
     using Microsoft.Extensions.DependencyInjection;
@@ -53,6 +54,9 @@ namespace MassTransit.Configuration
             collection.TryAddScoped<IScopedBusContextProvider<IBus>, ScopedBusContextProvider<IBus>>();
             collection.TryAddScoped(provider => provider.GetRequiredService<IScopedBusContextProvider<IBus>>().Context.SendEndpointProvider);
             collection.TryAddScoped(provider => provider.GetRequiredService<IScopedBusContextProvider<IBus>>().Context.PublishEndpoint);
+            collection.TryAddScoped<IRoutingSlipExecutor>(provider => new RoutingSlipExecutor(
+                provider.GetRequiredService<IScopedBusContextProvider<IBus>>().Context.SendEndpointProvider,
+                provider.GetRequiredService<IScopedBusContextProvider<IBus>>().Context.PublishEndpoint));
         }
 
         protected ServiceCollectionBusConfigurator(IServiceCollection collection, IContainerRegistrar registrar)
@@ -61,7 +65,7 @@ namespace MassTransit.Configuration
             AddMassTransitComponents(collection);
         }
 
-        [Obsolete("This method is deprecated, please use 'Using[TransportName]' instead", true)]
+        [Obsolete("Use 'Using[TransportName]' instead. Visit https://masstransit.io/obsolete for details.", true)]
         public virtual void AddBus(Func<IBusRegistrationContext, IBusControl> busFactory)
         {
             SetBusFactory(new RegistrationBusFactory(busFactory));
@@ -87,17 +91,25 @@ namespace MassTransit.Configuration
 
         public virtual void AddRider(Action<IRiderRegistrationConfigurator> configure)
         {
-            var configurator = new ServiceCollectionRiderConfigurator(this, new DependencyInjectionRiderContainerRegistrar(this));
+            var configurator = new ServiceCollectionRiderConfigurator(this, new DependencyInjectionRiderContainerRegistrar<IBus>(this));
             configure?.Invoke(configurator);
         }
 
-        public override void AddConfigureEndpointsCallback(ConfigureEndpointsProviderCallback callback)
+        public virtual void AddConfigureEndpointsCallback(ConfigureEndpointsCallback callback)
         {
             if (callback == null)
                 throw new ArgumentNullException(nameof(callback));
 
-            this.TryAddSingleton<IConfigureReceiveEndpoint>(provider =>
-                new ConfigureReceiveEndpointDelegateProvider(provider.GetRequiredService<Bind<IBus, IBusRegistrationContext>>().Value, callback));
+            this.AddSingleton(provider => Bind<IBus>.Create((IConfigureReceiveEndpoint)new ConfigureReceiveEndpointDelegate(callback)));
+        }
+
+        public virtual void AddConfigureEndpointsCallback(ConfigureEndpointsProviderCallback callback)
+        {
+            if (callback == null)
+                throw new ArgumentNullException(nameof(callback));
+
+            this.AddSingleton(provider => Bind<IBus>.Create((IConfigureReceiveEndpoint)new ConfigureReceiveEndpointDelegateProvider(
+                provider.GetRequiredService<Bind<IBus, IBusRegistrationContext>>().Value, callback)));
         }
 
         static IBusInstance CreateBus<T>(T busFactory, IServiceProvider provider)
@@ -139,6 +151,14 @@ namespace MassTransit.Configuration
                 return new BusRegistrationContext(provider, Registrar, setter.Value);
             }
 
+            static Bind<TBus, IScopedConsumeContextProvider> CreateScopeProvider(IServiceProvider provider)
+            {
+                var global = provider.GetRequiredService<IScopedConsumeContextProvider>();
+                return Bind<TBus>.Create((IScopedConsumeContextProvider)new TypedScopedConsumeContextProvider(global));
+            }
+
+            collection.TryAddScoped(CreateScopeProvider);
+
             collection.AddSingleton(_ =>
                 Bind<TBus>.Create((ISetScopedConsumeContext)new SetScopedConsumeContext(provider =>
                     provider.GetRequiredService<Bind<TBus, IScopedConsumeContextProvider>>().Value)));
@@ -147,13 +167,9 @@ namespace MassTransit.Configuration
             collection.TryAddScoped(provider => Bind<TBus>.Create(provider.GetRequiredService<IScopedBusContextProvider<TBus>>().Context.SendEndpointProvider));
             collection.TryAddScoped(provider => Bind<TBus>.Create(provider.GetRequiredService<IScopedBusContextProvider<TBus>>().Context.PublishEndpoint));
 
-            static Bind<TBus, IScopedConsumeContextProvider> CreateScopeProvider(IServiceProvider provider)
-            {
-                var global = provider.GetRequiredService<IScopedConsumeContextProvider>();
-                return Bind<TBus>.Create((IScopedConsumeContextProvider)new TypedScopedConsumeContextProvider(global));
-            }
-
-            collection.TryAddScoped(CreateScopeProvider);
+            collection.TryAddScoped(provider => Bind<TBus>.Create<IRoutingSlipExecutor>(new RoutingSlipExecutor(
+                provider.GetRequiredService<IScopedBusContextProvider<IBus>>().Context.SendEndpointProvider,
+                provider.GetRequiredService<IScopedBusContextProvider<IBus>>().Context.PublishEndpoint)));
 
             collection.AddSingleton(provider => Bind<TBus>.Create(CreateRegistrationContext(provider)));
         }
@@ -191,13 +207,19 @@ namespace MassTransit.Configuration
             configure?.Invoke(configurator);
         }
 
+        public override void AddConfigureEndpointsCallback(ConfigureEndpointsCallback callback)
+        {
+            this.AddSingleton(provider => Bind<TBus>.Create((IConfigureReceiveEndpoint)new ConfigureReceiveEndpointDelegate(callback)));
+        }
+
         public override void AddConfigureEndpointsCallback(ConfigureEndpointsProviderCallback callback)
         {
             if (callback == null)
                 throw new ArgumentNullException(nameof(callback));
 
-            this.TryAddSingleton<IConfigureReceiveEndpoint>(provider =>
-                new ConfigureReceiveEndpointDelegateProvider(provider.GetRequiredService<Bind<TBus, IBusRegistrationContext>>().Value, callback));
+            this.AddSingleton(provider => Bind<TBus>.Create((IConfigureReceiveEndpoint)new ConfigureReceiveEndpointDelegateProvider(
+                provider.GetRequiredService<Bind<TBus, IBusRegistrationContext>>().Value,
+                callback)));
         }
 
         static IBusInstance<TBus> CreateBus<T>(T busFactory, IServiceProvider provider)

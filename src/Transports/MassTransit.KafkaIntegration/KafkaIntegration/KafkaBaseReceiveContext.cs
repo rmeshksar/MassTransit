@@ -2,7 +2,6 @@
 {
     using System;
     using Confluent.Kafka;
-    using Serialization;
     using Transports;
 
 
@@ -50,6 +49,7 @@
         public int Partition => _result.Partition;
 
         public long Offset => _result.Offset;
+        public bool IsPartitionEof => _result.IsPartitionEOF;
 
         public DateTime CheckpointUtcDateTime => _result.Message.Timestamp.UtcDateTime;
     }
